@@ -4,100 +4,113 @@ import glob
 import pdfplumber
 import pandas as pd
 
-# --- CONFIGURATION (Adjust file name if needed) ---
-EXCEL_FILE = "master_list.xlsx"  # Change this if your file name is different
+# --- CONFIGURATION ---
+EXCEL_FILE = "master_list.xlsx" 
 INVOICE_FOLDER = "Invoices"
 OUTPUT_FILE = "reconciliation_report.xlsx"
 
+def extract_numbers_from_text(text):
+    """Helper to cleanly extract a numeric amount out of a mixed text string"""
+    if not text:
+        return 0.0
+    # Find numbers that look like integers or decimals (e.g., 1,234.50 or 500)
+    found = re.findall(r"[\d,.]+", text)
+    if found:
+        # Use the last numeric element found in that snippet
+        clean_num = found[-1].replace(",", "")
+        try:
+            return float(clean_num)
+        except ValueError:
+            return 0.0
+    return 0.0
+
 def extract_pdf_data(pdf_path):
-    """Extracts required matching fields from a single offline PDF invoice"""
     data = {
         "BillNo": None, "Date": None, "EPName": None, 
-        "Amount": None, "TDS": None, "GST": None, "NetAmt": None
+        "NetAmt": None, "Amount": None, "TDS": None, "GST": None, "Days": None
     }
     
     with pdfplumber.open(pdf_path) as pdf:
         all_text = ""
-        all_tables = []
-        
-        # Scrape text and tables across all pages
         for page in pdf.pages:
             text = page.extract_text()
             if text:
                 all_text += text + "\n"
-            tables = page.extract_tables()
-            if tables:
-                all_tables.extend(tables)
 
-        # 1. BillNo: Find "Invoice No. :  LS/" followed by a 9-digit number
-        bill_match = re.search(r"Invoice\s*No\.\s*:\s*LS/(\d{9})", all_text, re.IGNORECASE)
-        if bill_match:
-            data["BillNo"] = f"LS/{bill_match.group(1)}"
+        lines = [line.strip() for line in all_text.split("\n") if line.strip()]
 
-        # 2. Date: Find "Invoice Date : DD/MM/YYYY"
-        date_match = re.search(r"Invoice\s*Date\s*:\s*(\d{2}/\d{2}/\d{4})", all_text, re.IGNORECASE)
-        if date_match:
-            data["Date"] = date_match.group(1)
-
-        # 3. EPName: Look below Consignee or Buyer details
-        lines = all_text.split("\n")
         for i, line in enumerate(lines):
-            if "Details of Consignee" in line or "Details of Buyer" in line:
-                # Grab the next non-empty line as the Company Name
-                for next_line in lines[i+1:i+5]:
-                    if next_line.strip():
-                        data["EPName"] = next_line.strip()
-                        break
-                break
+            
+            # 1. BillNo: Find "Invoice No. :" and pull only the 9 digits after "LS/"
+            if "Invoice No." in line:
+                bill_match = re.search(r"LS/(\d{9})", line, re.IGNORECASE)
+                if bill_match:
+                    data["BillNo"] = bill_match.group(1)
 
-        # 4. TDS: After "LESS 0.10% TDS IN INR"
-        tds_match = re.search(r"LESS\s*0\.10%\s*TDS\s*IN\s*INR\s*[:\-]?\s*([\d,.]+)", all_text, re.IGNORECASE)
-        if tds_match:
-            data["TDS"] = float(tds_match.group(1).replace(",", ""))
+            # 2. Date: Find "Invoice Date :" and parse DD/MM/YYYY
+            if "Invoice Date" in line:
+                date_match = re.search(r"(\d{2}/\d{2}/\d{4})", line)
+                if date_match:
+                    data["Date"] = date_match.group(1)
 
-        # 5. GST: After "Total Tax Amount (INR)"
-        gst_match = re.search(r"Total\s*Tax\s*Amount\s*\(INR\)\s*[:\-]?\s*([\d,.]+)", all_text, re.IGNORECASE)
-        if gst_match:
-            data["GST"] = float(gst_match.group(1).replace(",", ""))
+            # 3. EPName: Target line directly below "Details of Buyer ( Billed to)"
+            if "Details of Buyer" in line and "Billed to" in line:
+                if i + 1 < len(lines):
+                    data["EPName"] = lines[i + 1]
 
-        # 6. NetAmt: After "Total Invoice Amount (INR)"
-        net_match = re.search(r"Total\s*Invoice\s*Amount\s*\(INR\)\s*[:\-]?\s*([\d,.]+)", all_text, re.IGNORECASE)
-        if net_match:
-            data["NetAmt"] = float(net_match.group(1).replace(",", ""))
+            # 4. NetAmt (Priority 1): Check "Total Taxable Amt in INR @ 1.00"
+            if "Total Taxable Amt in INR" in line and "1.00" in line:
+                data["NetAmt"] = extract_numbers_from_text(line) * 1000
 
-        # 7. Amount: Total row, last column (Check tables)
-        for table in all_tables:
-            for row in table:
-                if row and any(cell and "Total" in str(cell) for cell in row):
-                    # Filter out empty cells in the row and grab the last one
-                    valid_cells = [cell for cell in row if cell is not None and str(cell).strip()]
-                    if valid_cells:
-                        last_cell = valid_cells[-1].replace(",", "")
-                        try:
-                            data["Amount"] = float(re.findall(r"[\d.]+", last_cell)[0])
-                        except IndexError:
-                            pass
-                    break
+            # 5. NetAmt (Priority 2 / Fallback): Look for "Total" row and take the final/last amount segment
+            if "Total" in line and data["NetAmt"] is None:
+                data["NetAmt"] = extract_numbers_from_text(line) * 1000
+
+            # 6. Amount (Priority 1): Check "Total Invoice Amount (INR)"
+            if "Total Invoice Amount" in line and "(INR)" in line:
+                data["Amount"] = extract_numbers_from_text(line) * 1000
+
+            # 7. Amount & Days (Fallback via Terms block)
+            if "Terms of Delivery and Payment from the date of invoice" in line:
+                if i + 1 < len(lines):
+                    below_line = lines[i + 1]
+                    
+                    # Days: Pull first sequence of digits up to 3 characters long
+                    days_match = re.search(r"^\d{1,3}", below_line)
+                    if days_match:
+                        data["Days"] = int(days_match.group(0))
+                    
+                    # Amount Fallback: If not found yet, get the last numbers showing after "INR"
+                    if data["Amount"] is None and "INR" in below_line:
+                        parts = below_line.split("INR")
+                        if len(parts) > 1:
+                            data["Amount"] = extract_numbers_from_text(parts[-1]) * 1000
+
+            # 8. TDS: Extract after "LESS 0.10% TDS IN INR"
+            if "LESS 0.10%" in line and "TDS" in line:
+                data["TDS"] = extract_numbers_from_text(line) * 1000
+
+            # 9. GST: Extract after "Total Tax Amount (INR)"
+            if "Total Tax Amount" in line and "(INR)" in line:
+                data["GST"] = extract_numbers_from_text(line) * 1000
 
     return data
 
 def run_reconciliation():
-    print("🚀 Starting Offline PDF Extraction...")
+    print("🚀 Running Offline Extraction Engine...")
     
-    # Check if files exist
     if not os.path.exists(EXCEL_FILE):
-        print(f"❌ Error: Could not find '{EXCEL_FILE}' in this directory.")
+        print(f"❌ Error: Cannot find your Excel sheet named '{EXCEL_FILE}'")
         return
         
-    # Read Excel Sheets
     excel_df = pd.read_excel(EXCEL_FILE)
-    # Ensure data types match for clean comparison
+    
+    # Standardize Excel BillNo formats to clean text string for exact matching
     excel_df['BillNo'] = excel_df['BillNo'].astype(str).str.strip()
     
-    # Scan PDFs
     pdf_files = glob.glob(os.path.join(INVOICE_FOLDER, "*.pdf"))
     if not pdf_files:
-        print(f"❌ Error: No PDFs found inside the '{INVOICE_FOLDER}' folder.")
+        print(f"❌ Error: Place your invoices into the '{INVOICE_FOLDER}' directory first.")
         return
 
     extracted_records = []
@@ -111,12 +124,9 @@ def run_reconciliation():
     pdf_df = pd.DataFrame(extracted_records)
     pdf_df['BillNo'] = pdf_df['BillNo'].astype(str).str.strip()
 
-    print("\n🔍 Cross-Referencing data against Excel...")
-    
-    # Merge datasets based on BillNo
+    print("\n🔍 Evaluating variances...")
     merged = pd.merge(excel_df, pdf_df, on="BillNo", suffixes=('_Excel', '_PDF'), how='outer')
 
-    # Status Matching Logic
     results = []
     for idx, row in merged.iterrows():
         status = "Match"
@@ -124,39 +134,32 @@ def run_reconciliation():
 
         if pd.isna(row['PDF_File']):
             status = "Missing PDF"
-            notes.append("Invoice exists in Excel but no matching PDF found.")
-        elif pd.isna(row['Date_Excel']):
-            status = "Missing Excel Record"
-            notes.append("PDF exists but Invoice is missing in Excel list.")
+            notes.append("No matching physical invoice found.")
+        elif pd.isna(row['EPName_Excel']):
+            status = "Missing Excel Entry"
+            notes.append("Invoice found in PDF files but row missing from master ledger.")
         else:
-            # 1. Check Amount within +-5 tolerance
-            amt_excel = float(row['Amount_Excel']) if not pd.isna(row['Amount_Excel']) else 0
-            amt_pdf = float(row['Amount_PDF']) if not pd.isna(row['Amount_PDF']) else 0
-            if abs(amt_excel - amt_pdf) > 5:
-                status = "Discrepancy"
-                notes.append(f"Amount mismatch (Excel: {amt_excel}, PDF: {amt_pdf})")
-
-            # 2. Check NetAmt, GST, TDS mismatches
-            for col in ['NetAmt', 'GST', 'TDS']:
-                ex_val = float(row[f'{col}_Excel']) if not pd.isna(row[f'{col}_Excel']) else 0
-                pdf_val = float(row[f'{col}_PDF']) if not pd.isna(row[f'{col}_PDF']) else 0
-                if abs(ex_val - pdf_val) > 0.5:  # small cents/paise tolerance
+            # Check numeric differences with a tolerance allowance of +/- 5 rupees
+            for numeric_col in ['NetAmt', 'Amount', 'TDS', 'GST']:
+                val_ex = float(row[f'{numeric_col}_Excel']) if not pd.isna(row[f'{numeric_col}_Excel']) else 0.0
+                val_pdf = float(row[f'{numeric_col}_PDF']) if not pd.isna(row[f'{numeric_col}_PDF']) else 0.0
+                if abs(val_ex - val_pdf) > 5.0:
                     status = "Discrepancy"
-                    notes.append(f"{col} mismatch")
+                    notes.append(f"{numeric_col} mismatch (Excel: {val_ex:.2f}, PDF: {val_pdf:.2f})")
 
         row['Reconciliation_Status'] = status
-        row['Discrepancy_Notes'] = ", ".join(notes) if notes else "All values match"
+        row['Discrepancy_Notes'] = ", ".join(notes) if notes else "All data points verified"
         results.append(row)
 
     output_df = pd.DataFrame(results)
     
-    # Clean up columns order for output
-    final_cols = ['BillNo', 'Reconciliation_Status', 'Discrepancy_Notes', 'PDF_File'] + \
-                 [c for c in output_df.columns if c not in ['BillNo', 'Reconciliation_Status', 'Discrepancy_Notes', 'PDF_File']]
-    output_df = output_df[final_cols]
+    # Order final file output cleanly
+    priority_cols = ['BillNo', 'Reconciliation_Status', 'Discrepancy_Notes', 'PDF_File']
+    final_order = priority_cols + [col for col in output_df.columns if col not in priority_cols]
+    output_df = output_df[final_order]
 
     output_df.to_excel(OUTPUT_FILE, index=False)
-    print(f"🎉 Success! Report saved cleanly as: {OUTPUT_FILE}")
+    print(f"🎉 Complete! View details in: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     run_reconciliation()
