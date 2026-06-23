@@ -11,7 +11,6 @@ OUTPUT_FILE = "reconciliation_report.xlsx"
 
 
 def extract_numbers_from_text(text):
-    """Extract last numeric value from a text line"""
     if not text:
         return None
     found = re.findall(r"[\d,.]+", text)
@@ -24,13 +23,40 @@ def extract_numbers_from_text(text):
     return None
 
 
-def get_next_non_empty_line(lines, start_index, max_lookahead=5):
-    """Get next useful line below a heading"""
+def get_next_non_empty_line(lines, start_index, max_lookahead=8):
     for j in range(start_index + 1, min(start_index + 1 + max_lookahead, len(lines))):
         candidate = lines[j].strip()
         if candidate:
             return candidate
     return None
+
+
+def get_block_below_until_stop(lines, start_index, stop_words=None, max_lookahead=12):
+    if stop_words is None:
+        stop_words = ["GSTIN/UID"]
+
+    collected = []
+    for j in range(start_index + 1, min(start_index + 1 + max_lookahead, len(lines))):
+        candidate = lines[j].strip()
+        if not candidate:
+            continue
+
+        upper_candidate = candidate.upper()
+        should_stop = any(stop_word.upper() in upper_candidate for stop_word in stop_words)
+        if should_stop:
+            break
+
+        collected.append(candidate)
+
+    return " ".join(collected).strip() if collected else None
+
+
+def normalize_billno(value):
+    if pd.isna(value):
+        return ""
+    value = str(value).strip()
+    match = re.search(r"(\d{9})", value)
+    return match.group(1) if match else value
 
 
 def extract_pdf_data(pdf_path):
@@ -58,60 +84,72 @@ def extract_pdf_data(pdf_path):
     lines = [line.strip() for line in all_text.split("\n") if line.strip()]
 
     for i, line in enumerate(lines):
+        upper_line = line.upper()
 
-        # 1. BillNo: 9 digits after LS/
-        if "Invoice No." in line:
-            bill_match = re.search(r"LS/(\d{9})", line, re.IGNORECASE)
+        # 1. BillNo from PDF: extract only 9 digits after LS/
+        if "INVOICE NO." in upper_line:
+            bill_match = re.search(r"LS/\s*(\d{9})", line, re.IGNORECASE)
             if bill_match:
                 data["BillNo"] = bill_match.group(1)
 
         # 2. Date
-        if "Invoice Date" in line:
+        if "INVOICE DATE" in upper_line:
             date_match = re.search(r"(\d{2}/\d{2}/\d{4})", line)
             if date_match:
                 data["Date"] = date_match.group(1)
 
-        # 3. Buyer Name - same next-line logic as consignee
-        if "Details of Buyer" in line and "Billed to" in line:
+        # 3. Buyer name = next line data only
+        if "DETAILS OF BUYER" in upper_line and "BILLED TO" in upper_line:
             data["PDF_Buyer_Name"] = get_next_non_empty_line(lines, i)
 
-        # 4. Consignee Name
-        if "Details of Consignee" in line and "Shipped to" in line:
-            data["PDF_Consignee_Name"] = get_next_non_empty_line(lines, i)
+        # 4. Consignee name = collect below lines until GSTIN/UID
+        if "DETAILS OF CONSIGNEE" in upper_line and "SHIPPED TO" in upper_line:
+            data["PDF_Consignee_Name"] = get_block_below_until_stop(
+                lines, i, stop_words=["GSTIN/UID"]
+            )
 
-        # 5. NetAmt location 1
-        if "Total Taxable Amt in INR" in line and "1.00" in line:
-            data["PDF_NetAmt_Taxable"] = extract_numbers_from_text(line)
+        # 5. NetAmt Taxable = number after text
+        if "TOTAL TAXABLE AMT IN INR @ 1.00" in upper_line:
+            after_text = re.split(r"Total Taxable Amt in INR @ 1\.00", line, flags=re.IGNORECASE)
+            if len(after_text) > 1:
+                data["PDF_NetAmt_Taxable"] = extract_numbers_from_text(after_text[1])
+            else:
+                data["PDF_NetAmt_Taxable"] = extract_numbers_from_text(line)
 
-        # 6. NetAmt location 2
-        if "Total" in line:
-            val = extract_numbers_from_text(line)
-            if val is not None:
-                data["PDF_NetAmt_TotalRow"] = val
+            # As per your request, TotalRow should also come from here
+            if data["PDF_NetAmt_TotalRow"] is None:
+                if len(after_text) > 1:
+                    data["PDF_NetAmt_TotalRow"] = extract_numbers_from_text(after_text[1])
+                else:
+                    data["PDF_NetAmt_TotalRow"] = extract_numbers_from_text(line)
 
-        # 7. Amount location 1
-        if "Total Invoice Amount" in line and "(INR)" in line:
-            data["PDF_Amount_Invoice"] = extract_numbers_from_text(line)
+        # 6. Amount Invoice
+        if "TOTAL INVOICE AMOUNT" in upper_line and "(INR)" in upper_line:
+            after_text = re.split(r"Total Invoice Amount\s*\(INR\)", line, flags=re.IGNORECASE)
+            if len(after_text) > 1:
+                data["PDF_Amount_Invoice"] = extract_numbers_from_text(after_text[1])
+            else:
+                data["PDF_Amount_Invoice"] = extract_numbers_from_text(line)
 
-        # 8. Amount location 2 + Days
-        if "Terms of Delivery and Payment from the date of invoice" in line:
+        # 7. Amount Terms from C&F text and Days from next line of terms block
+        if "TERMS OF DELIVERY AND PAYMENT FROM THE DATE OF INVOICE" in upper_line:
             below_line = get_next_non_empty_line(lines, i)
             if below_line:
                 days_match = re.search(r"^\d{1,3}", below_line)
                 if days_match:
                     data["Days"] = int(days_match.group(0))
 
-                if "INR" in below_line:
-                    parts = below_line.split("INR")
-                    if len(parts) > 1:
-                        data["PDF_Amount_Terms"] = extract_numbers_from_text(parts[-1])
+        if "C&F" in upper_line:
+            after_text = re.split(r"C&F", line, flags=re.IGNORECASE)
+            if len(after_text) > 1:
+                data["PDF_Amount_Terms"] = extract_numbers_from_text(after_text[1])
 
-        # 9. TDS
-        if "LESS 0.10%" in line and "TDS" in line:
+        # 8. TDS
+        if "LESS 0.10%" in upper_line and "TDS" in upper_line:
             data["TDS"] = extract_numbers_from_text(line)
 
-        # 10. GST
-        if "Total Tax Amount" in line and "(INR)" in line:
+        # 9. GST
+        if "TOTAL TAX AMOUNT" in upper_line and "(INR)" in upper_line:
             data["GST"] = extract_numbers_from_text(line)
 
     return data
@@ -126,7 +164,9 @@ def run_reconciliation():
 
     excel_df = pd.read_excel(EXCEL_FILE)
     excel_df.columns = excel_df.columns.str.strip()
-    excel_df['BillNo'] = excel_df['BillNo'].astype(str).str.strip()
+
+    # Normalize BillNo from Excel like LS/123456789 -> 123456789
+    excel_df['BillNo'] = excel_df['BillNo'].apply(normalize_billno)
 
     # KEEP THIS EXACTLY AS REQUESTED
     excel_cols_to_scale = ['NetAmt', 'Amount', 'TDS', 'GST']
@@ -149,7 +189,7 @@ def run_reconciliation():
 
     pdf_df = pd.DataFrame(extracted_records)
     pdf_df.columns = pdf_df.columns.str.strip()
-    pdf_df['BillNo'] = pdf_df['BillNo'].astype(str).str.strip()
+    pdf_df['BillNo'] = pdf_df['BillNo'].apply(normalize_billno)
 
     print("\n🔍 Evaluating variances...")
     merged = pd.merge(excel_df, pdf_df, on="BillNo", suffixes=('_Excel', '_PDF'), how='outer')
@@ -174,19 +214,15 @@ def run_reconciliation():
             pdf_buyer = str(row['PDF_Buyer_Name']).strip().lower() if not pd.isna(row.get('PDF_Buyer_Name')) else ""
             pdf_consignee = str(row['PDF_Consignee_Name']).strip().lower() if not pd.isna(row.get('PDF_Consignee_Name')) else ""
 
-            # Party name should match either buyer or consignee
             if excel_name not in pdf_buyer and excel_name not in pdf_consignee:
                 status = "Discrepancy"
                 notes.append("Party Name mismatch")
 
             excel_net = float(row['NetAmt']) if not pd.isna(row.get('NetAmt')) else 0.0
             excel_amt = float(row['Amount']) if not pd.isna(row.get('Amount')) else 0.0
-            excel_tds = float(row['TDS_Excel']) if 'TDS_Excel' in merged.columns and not pd.isna(row.get('TDS_Excel')) else (
-                float(row['TDS']) if 'TDS' in merged.columns and not pd.isna(row.get('TDS')) else 0.0
-            )
-            excel_gst = float(row['GST_Excel']) if 'GST_Excel' in merged.columns and not pd.isna(row.get('GST_Excel')) else (
-                float(row['GST']) if 'GST' in merged.columns and not pd.isna(row.get('GST')) else 0.0
-            )
+
+            excel_tds = float(row['TDS_Excel']) if 'TDS_Excel' in merged.columns and not pd.isna(row.get('TDS_Excel')) else 0.0
+            excel_gst = float(row['GST_Excel']) if 'GST_Excel' in merged.columns and not pd.isna(row.get('GST_Excel')) else 0.0
 
             pdf_net_taxable = float(row['PDF_NetAmt_Taxable']) if not pd.isna(row.get('PDF_NetAmt_Taxable')) else None
             pdf_net_totalrow = float(row['PDF_NetAmt_TotalRow']) if not pd.isna(row.get('PDF_NetAmt_TotalRow')) else None
@@ -220,16 +256,14 @@ def run_reconciliation():
                 )
 
             # TDS
-            if pdf_tds is not None:
-                if abs(excel_tds - pdf_tds) > 5.0:
-                    status = "Discrepancy"
-                    notes.append(f"TDS mismatch (Excel: {excel_tds:.2f}, PDF: {pdf_tds:.2f})")
+            if pdf_tds is not None and abs(excel_tds - pdf_tds) > 5.0:
+                status = "Discrepancy"
+                notes.append(f"TDS mismatch (Excel: {excel_tds:.2f}, PDF: {pdf_tds:.2f})")
 
             # GST
-            if pdf_gst is not None:
-                if abs(excel_gst - pdf_gst) > 5.0:
-                    status = "Discrepancy"
-                    notes.append(f"GST mismatch (Excel: {excel_gst:.2f}, PDF: {pdf_gst:.2f})")
+            if pdf_gst is not None and abs(excel_gst - pdf_gst) > 5.0:
+                status = "Discrepancy"
+                notes.append(f"GST mismatch (Excel: {excel_gst:.2f}, PDF: {pdf_gst:.2f})")
 
         row['Reconciliation_Status'] = status
         row['Discrepancy_Notes'] = ", ".join(notes) if notes else "All data points verified"
