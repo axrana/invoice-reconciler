@@ -24,7 +24,7 @@ def extract_numbers_from_text(text):
 
 def extract_pdf_data(pdf_path):
     data = {
-        "BillNo": None, "Date": None, "EPName": None, 
+        "BillNo": None, "Date": None, "PDF_Buyer_Name": None, "PDF_Consignee_Name": None,
         "PDF_NetAmt_Taxable": None, "PDF_NetAmt_TotalRow": None,
         "PDF_Amount_Invoice": None, "PDF_Amount_Terms": None,
         "TDS": None, "GST": None, "Days": None
@@ -53,10 +53,16 @@ def extract_pdf_data(pdf_path):
                 if date_match:
                     data["Date"] = date_match.group(1)
 
-            # 3. EPName: Line below "Details of Buyer ( Billed to)"
+            # 3. EPName Verification (Dual Fields Extraction)
+            # Buyer Name
             if "Details of Buyer" in line and "Billed to" in line:
                 if i + 1 < len(lines):
-                    data["EPName"] = lines[i + 1]
+                    data["PDF_Buyer_Name"] = lines[i + 1].strip()
+            
+            # Consignee Name
+            if "Details of Consignee" in line and "Shipped to" in line:
+                if i + 1 < len(lines):
+                    data["PDF_Consignee_Name"] = lines[i + 1].strip()
 
             # 4. NetAmt Place 1: "Total Taxable Amt in INR @ 1.00"
             if "Total Taxable Amt in INR" in line and "1.00" in line:
@@ -64,7 +70,6 @@ def extract_pdf_data(pdf_path):
 
             # 5. NetAmt Place 2: "Total" row last column
             if "Total" in line:
-                # Store it specifically as the total row tracking
                 val = extract_numbers_from_text(line)
                 if val is not None:
                     data["PDF_NetAmt_TotalRow"] = val
@@ -78,12 +83,10 @@ def extract_pdf_data(pdf_path):
                 if i + 1 < len(lines):
                     below_line = lines[i + 1]
                     
-                    # Days extraction
                     days_match = re.search(r"^\d{1,3}", below_line)
                     if days_match:
                         data["Days"] = int(days_match.group(0))
                     
-                    # Amount extraction after "INR"
                     if "INR" in below_line:
                         parts = below_line.split("INR")
                         if len(parts) > 1:
@@ -100,7 +103,7 @@ def extract_pdf_data(pdf_path):
     return data
 
 def run_reconciliation():
-    print("🚀 Running Offline Verification Engine (Dual-Location Checks Enabled)...")
+    print("🚀 Running Offline Verification Engine (Dual Party Name Checks Enabled)...")
     
     if not os.path.exists(EXCEL_FILE):
         print(f"❌ Error: Cannot find your Excel sheet named '{EXCEL_FILE}'")
@@ -142,10 +145,19 @@ def run_reconciliation():
         if pd.isna(row['PDF_File']):
             status = "Missing PDF"
             notes.append("No matching physical invoice found.")
-        elif pd.isna(row['EPName_Excel']):
+        elif pd.isna(row['EPName']):
             status = "Missing Excel Entry"
             notes.append("Invoice found in PDF files but row missing from master ledger.")
         else:
+            excel_name = str(row['EPName']).strip().lower()
+            pdf_buyer = str(row['PDF_Buyer_Name']).strip().lower() if not pd.isna(row['PDF_Buyer_Name']) else ""
+            pdf_consignee = str(row['PDF_Consignee_Name']).strip().lower() if not pd.isna(row['PDF_Consignee_Name']) else ""
+            
+            # --- VERIFY PARTY NAMES (Should match either Buyer OR Consignee) ---
+            if excel_name not in pdf_buyer and excel_name not in pdf_consignee:
+                status = "Discrepancy"
+                notes.append("Party Name mismatch (Excel name does not match Buyer or Consignee lines)")
+
             excel_net = float(row['NetAmt']) if not pd.isna(row['NetAmt']) else 0.0
             excel_amt = float(row['Amount']) if not pd.isna(row['Amount']) else 0.0
             
@@ -185,7 +197,6 @@ def run_reconciliation():
 
     output_df = pd.DataFrame(results)
     
-    # Order final file output cleanly
     priority_cols = ['BillNo', 'Reconciliation_Status', 'Discrepancy_Notes', 'PDF_File']
     final_order = priority_cols + [col for col in output_df.columns if col not in priority_cols]
     output_df = output_df[final_order]
