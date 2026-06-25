@@ -113,17 +113,17 @@ def extract_pdf_data(pdf_path):
                     break
                 j += 1
 
-        # --- Consignee Name: restored simple logic + trim at GSTIN/UID ---
+        # --- Consignee Name: next line, trim off GSTIN/UID if present ---
         if "Details of Consignee" in line and "Shipped to" in line:
             if i + 1 < len(lines):
                 next_line = lines[i + 1].strip()
                 upper_next = next_line.upper()
 
-                # If the next line is only GSTIN, no separate name line
+                # If the next line starts with GSTIN, there is no separate name line
                 if upper_next.startswith("GSTIN/UID"):
                     pass
                 else:
-                    # If GSTIN/UID appears later in the line, keep only part before it
+                    # If GSTIN/UID appears later, keep only part before it
                     if "GSTIN/UID" in upper_next:
                         parts = re.split(r"GSTIN/UID", next_line, flags=re.IGNORECASE)
                         name_part = parts[0].strip()
