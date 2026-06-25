@@ -113,31 +113,24 @@ def extract_pdf_data(pdf_path):
                     break
                 j += 1
 
-                        # --- Consignee Name: next non-empty line, trim anything after GSTIN/UID ---
+        # --- Consignee Name: restored simple logic + trim at GSTIN/UID ---
         if "Details of Consignee" in line and "Shipped to" in line:
-            j = i + 1
-            while j < len(lines):
-                candidate = lines[j].strip()
-                if candidate:  # non-empty
-                    upper_cand = candidate.upper()
+            if i + 1 < len(lines):
+                next_line = lines[i + 1].strip()
+                upper_next = next_line.upper()
 
-                    # If the very first real line is just GSTIN, no separate name line
-                    if "GSTIN/UID" in upper_cand and upper_cand.startswith("GSTIN/UID"):
-                        break
-
-                    # If GSTIN/UID appears later in the line, keep only the part before it
-                    if "GSTIN/UID" in upper_cand:
-                        parts = re.split(r"GSTIN/UID", candidate, flags=re.IGNORECASE)
+                # If the next line is only GSTIN, no separate name line
+                if upper_next.startswith("GSTIN/UID"):
+                    pass
+                else:
+                    # If GSTIN/UID appears later in the line, keep only part before it
+                    if "GSTIN/UID" in upper_next:
+                        parts = re.split(r"GSTIN/UID", next_line, flags=re.IGNORECASE)
                         name_part = parts[0].strip()
                         if name_part:
                             data["PDF_Consignee_Name"] = name_part
-                        break
-
-                    # Otherwise, treat the whole line as consignee name
-                    data["PDF_Consignee_Name"] = candidate
-                    break
-
-                j += 1
+                    else:
+                        data["PDF_Consignee_Name"] = next_line
 
         # --- NetAmt candidate 1: Total Taxable Amt in INR @ 1.00 ... ---
         if "TOTAL TAXABLE AMT IN INR" in upper_line and "1.00" in upper_line:
@@ -273,17 +266,19 @@ def run_reconciliation():
             excel_tds = float(row["TDS"]) if not pd.isna(row.get("TDS")) else 0.0
             excel_gst = float(row["GST"]) if not pd.isna(row.get("GST")) else 0.0
 
-            # --- NetAmt candidates ---
+            # --- NetAmt candidates (PDF) ---
             net1 = row.get("PDF_NetAmt_Taxable")
             net2 = row.get("PDF_NetAmt_TotalRow")
             net1 = float(net1) if not pd.isna(net1) else None
             net2 = float(net2) if not pd.isna(net2) else None
 
             if net1 is not None or net2 is not None:
+                # PDF pair should agree with each other within tolerance, if both exist
                 pdf_pair_consistent = True
                 if net1 is not None and net2 is not None:
                     pdf_pair_consistent = abs(net1 - net2) <= AMOUNT_TOL
 
+                # Excel vs each candidate
                 m1 = net1 is not None and abs(excel_net - net1) <= AMOUNT_TOL
                 m2 = net2 is not None and abs(excel_net - net2) <= AMOUNT_TOL
 
@@ -297,7 +292,7 @@ def run_reconciliation():
                         f"TotalRow: {net2 if net2 is not None else 'NA'})"
                     )
 
-            # --- Amount (gross) candidates ---
+            # --- Amount (gross) candidates (PDF) ---
             amt1 = row.get("PDF_Amount_Invoice")
             amt2 = row.get("PDF_Amount_Terms")
             amt1 = float(amt1) if not pd.isna(amt1) else None
@@ -321,7 +316,7 @@ def run_reconciliation():
                         f"Terms: {amt2 if amt2 is not None else 'NA'})"
                     )
 
-            # --- TDS ---
+            # --- TDS with ±₹3 tolerance ---
             tds_pdf = row.get("TDS")
             tds_pdf = float(tds_pdf) if not pd.isna(tds_pdf) else None
             if tds_pdf is not None:
@@ -331,7 +326,7 @@ def run_reconciliation():
                         f"TDS mismatch (Excel: {excel_tds:.2f}, PDF: {tds_pdf:.2f})"
                     )
 
-            # --- GST ---
+            # --- GST with ±₹3 tolerance ---
             gst_pdf = row.get("GST")
             gst_pdf = float(gst_pdf) if not pd.isna(gst_pdf) else None
             if gst_pdf is not None:
@@ -342,12 +337,13 @@ def run_reconciliation():
                     )
 
             # --- Days: exact match, no tolerance ---
-            pdf_days = row.get("Days")
-            excel_days_val = row.get("Days_Excel", row.get("Days"))
-            if not pd.isna(excel_days_val) and pdf_days is not None and not pd.isna(pdf_days):
+            excel_days_val = row.get("Days")
+            pdf_days_val = row.get("Days")  # same column name from PDF extract
+
+            if not pd.isna(excel_days_val) and not pd.isna(pdf_days_val):
                 try:
                     excel_days_int = int(excel_days_val)
-                    pdf_days_int = int(pdf_days)
+                    pdf_days_int = int(pdf_days_val)
                     if excel_days_int != pdf_days_int:
                         status = "Discrepancy"
                         notes.append(
