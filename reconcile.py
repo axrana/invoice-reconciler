@@ -74,7 +74,6 @@ def normalize_billno(value):
     match = re.search(r"(\d{8,9})", value)
     return match.group(1) if match else value
 
-
 def extract_pdf_data(pdf_path):
     data = {
         "BillNo": None,
@@ -114,23 +113,15 @@ def extract_pdf_data(pdf_path):
             if date_match:
                 data["Date"] = date_match.group(1)
 
-        # --- Buyer Name: FIRST line only after header ---
-        if "DETAILS OF BUYER" in upper_line and "BILLED TO" in upper_line:
-            data["PDF_Buyer_Name"] = get_first_non_empty_line(
-                lines,
-                i,
-                max_lookahead=8,
-                stop_markers=["GSTIN/UID", "INVOICE NO."]
-            )
+        # --- Buyer Name: EXACT header match, next line only ---
+        if line.strip() == "Details of Buyer ( Billed to)":
+            if i + 1 < len(lines):
+                data["PDF_Buyer_Name"] = lines[i + 1].strip()
 
-        # --- Consignee Name: FIRST line only after header ---
-        if "DETAILS OF  CONSIGNEE" in upper_line and "SHIPPED TO" in upper_line:
-            data["PDF_Consignee_Name"] = get_first_non_empty_line(
-                lines,
-                i,
-                max_lookahead=8,
-                stop_markers=["GSTIN/UID"]
-            )
+        # --- Consignee Name: EXACT header match, next line only ---
+        if line.strip() == "Details of  Consignee ( Shipped to)":
+            if i + 1 < len(lines):
+                data["PDF_Consignee_Name"] = lines[i + 1].strip()
 
         # --- NetAmt candidate 1: Total Taxable Amt in INR @ 1.00 ... ---
         if "TOTAL TAXABLE AMT IN INR" in upper_line and "1.00" in upper_line:
@@ -152,15 +143,17 @@ def extract_pdf_data(pdf_path):
             else:
                 data["PDF_Amount_Invoice"] = extract_numbers_from_text(line)
 
-        # --- Terms: use LAST amount from the next non-empty line ---
-        if "TERMS OF DELIVERY AND PAYMENT FROM THE DATE OF INVOICE" in upper_line:
-            below = get_next_non_empty_line(lines, i, max_lookahead=8)
-            if below:
-                # Days: first 1-3 digits at start
+        # --- Terms: exact header, use LAST amount in next line ---
+        if line.strip().startswith("Terms of Delivery and Payment from the date of invoice"):
+            if i + 1 < len(lines):
+                below = lines[i + 1].strip()
+
+                # Optional: Days at start (e.g. "5 DAYS ...")
                 days_match = re.search(r"^\s*(\d{1,3})", below)
                 if days_match:
                     data["Days"] = int(days_match.group(1))
-                # Terms amount: last number in the line, regardless of text
+
+                # Terms amount: always use last number on this line
                 terms_amt = extract_numbers_from_text(below)
                 if terms_amt is not None:
                     data["PDF_Amount_Terms"] = terms_amt
