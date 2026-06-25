@@ -114,25 +114,30 @@ def extract_pdf_data(pdf_path):
                     break
                 j += 1
 
-        # --- Consignee Name: find first valid line BELOW header ---
-        if line.strip() == "Details of  Consignee ( Shipped to)":
+               # --- Consignee Name: find first valid line BELOW header (flexible match) ---
+        if (
+            "DETAILS OF" in upper_line
+            and "CONSIGNEE" in upper_line
+            and "SHIPPED TO" in upper_line
+        ):
             j = i + 1
             while j < len(lines):
                 candidate = lines[j].strip()
                 upper_cand = candidate.upper()
 
-                # stop when we hit GSTIN/PAN row (beyond name)
+                # stop if we clearly moved past consignee block into next section
                 if "GSTIN/UID" in upper_cand and "PAN" in upper_cand:
                     break
 
-                # skip empty or non-name lines
+                # choose the first non-empty line that is not GSTIN/PAN
                 if candidate and not (
                     "GSTIN/UID" in upper_cand
                     or "PAN NO" in upper_cand
-                    or "STATE :" in upper_cand
+                    or "PAN :" in upper_cand
                 ):
                     data["PDF_Consignee_Name"] = candidate
                     break
+
                 j += 1
 
         # --- NetAmt candidate 1: Total Taxable Amt in INR @ 1.00 ... ---
