@@ -114,12 +114,8 @@ def extract_pdf_data(pdf_path):
                     break
                 j += 1
 
-                       # --- Consignee Name: simple rule - next non-empty line, stop before GSTIN ---
-        if (
-            "DETAILS OF" in upper_line
-            and "CONSIGNEE" in upper_line
-            and "SHIPPED TO" in upper_line
-        ):
+                               # --- Consignee Name: match on "Consignee ( Shipped to)" only ---
+        if "CONSIGNEE ( SHIPPED TO)" in upper_line:
             # look for the next non-empty line
             j = i + 1
             while j < len(lines):
