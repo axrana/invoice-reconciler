@@ -49,11 +49,19 @@ def get_first_non_empty_line(lines, start_index, max_lookahead=8, stop_markers=N
     return None
 
 
+def get_next_non_empty_line(lines, start_index, max_lookahead=8):
+    """Return the next non-empty line after start_index."""
+    for j in range(start_index + 1, min(start_index + 1 + max_lookahead, len(lines))):
+        candidate = lines[j].strip()
+        if candidate:
+            return candidate
+    return None
+
+
 def normalize_name(name):
     """Normalize party name for exact comparison: strip, collapse spaces, lowercase."""
     if not name or pd.isna(name):
         return ""
-    # Remove leading/trailing spaces, collapse internal multiple spaces
     name = " ".join(str(name).strip().split())
     return name.lower()
 
@@ -144,30 +152,18 @@ def extract_pdf_data(pdf_path):
             else:
                 data["PDF_Amount_Invoice"] = extract_numbers_from_text(line)
 
-        # --- Terms line: Days + "5 DAYS FIX INR ..." style amount ---
+        # --- Terms: use LAST amount from the next non-empty line ---
         if "TERMS OF DELIVERY AND PAYMENT FROM THE DATE OF INVOICE" in upper_line:
-            # Next non-empty line holds Days and maybe FIX INR amount
-            below = get_first_non_empty_line(lines, i, max_lookahead=4)
+            below = get_next_non_empty_line(lines, i, max_lookahead=8)
             if below:
                 # Days: first 1-3 digits at start
                 days_match = re.search(r"^\s*(\d{1,3})", below)
                 if days_match:
                     data["Days"] = int(days_match.group(1))
-
-                # Amount after "INR"
-                if "INR" in below.upper():
-                    parts = re.split(r"INR", below, flags=re.IGNORECASE)
-                    if len(parts) > 1:
-                        data["PDF_Amount_Terms"] = extract_numbers_from_text(parts[1])
-
-        # --- Additional Terms-like amount: DELIVERY ON ADVANCE INR ... ---
-        if "INR" in upper_line and "DELIVERY ON ADVANCE" in upper_line:
-            parts = re.split(r"INR", line, flags=re.IGNORECASE)
-            if len(parts) > 1:
-                extra_amt = extract_numbers_from_text(parts[1])
-                # Prefer an explicit DELIVER/ADVANCE amount if we don't already have one
-                if extra_amt is not None:
-                    data["PDF_Amount_Terms"] = extra_amt
+                # Terms amount: last number in the line, regardless of text
+                terms_amt = extract_numbers_from_text(below)
+                if terms_amt is not None:
+                    data["PDF_Amount_Terms"] = terms_amt
 
         # --- TDS ---
         if "LESS 0.10%" in upper_line and "TDS" in upper_line:
@@ -181,7 +177,7 @@ def extract_pdf_data(pdf_path):
 
 
 def run_reconciliation():
-    print("🚀 Running Offline Verification Engine (exact name + double-location checks)...")
+    print("🚀 Running Offline Verification Engine (exact name + simplified terms amount)...")
 
     if not os.path.exists(EXCEL_FILE):
         print(f"❌ Error: Cannot find your Excel sheet named '{EXCEL_FILE}'")
@@ -254,7 +250,7 @@ def run_reconciliation():
             buyer_name_norm = normalize_name(row.get("PDF_Buyer_Name"))
             consignee_name_norm = normalize_name(row.get("PDF_Consignee_Name"))
 
-            if excel_name_norm and excel_name_norm not in ("", None):
+            if excel_name_norm:
                 if not (
                     excel_name_norm == buyer_name_norm
                     or excel_name_norm == consignee_name_norm
@@ -315,7 +311,7 @@ def run_reconciliation():
                     notes.append(
                         f"Amount mismatch (Excel: {excel_amt:.2f}, "
                         f"Invoice: {amt1 if amt1 is not None else 'NA'}, "
-                        f"Terms/Advance: {amt2 if amt2 is not None else 'NA'})"
+                        f"Terms: {amt2 if amt2 is not None else 'NA'})"
                     )
 
             # --- TDS ---
