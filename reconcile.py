@@ -113,14 +113,31 @@ def extract_pdf_data(pdf_path):
                     break
                 j += 1
 
-                # --- Consignee Name: old logic + stop if next line is GSTIN/UID ---
+                        # --- Consignee Name: next non-empty line, trim anything after GSTIN/UID ---
         if "Details of Consignee" in line and "Shipped to" in line:
-            if i + 1 < len(lines):
-                next_line = lines[i + 1].strip()
-                upper_next = next_line.upper()
-                # if the next line is already GSTIN, then there is no separate consignee name line
-                if "GSTIN/UID" not in upper_next:
-                    data["PDF_Consignee_Name"] = next_line
+            j = i + 1
+            while j < len(lines):
+                candidate = lines[j].strip()
+                if candidate:  # non-empty
+                    upper_cand = candidate.upper()
+
+                    # If the very first real line is just GSTIN, no separate name line
+                    if "GSTIN/UID" in upper_cand and upper_cand.startswith("GSTIN/UID"):
+                        break
+
+                    # If GSTIN/UID appears later in the line, keep only the part before it
+                    if "GSTIN/UID" in upper_cand:
+                        parts = re.split(r"GSTIN/UID", candidate, flags=re.IGNORECASE)
+                        name_part = parts[0].strip()
+                        if name_part:
+                            data["PDF_Consignee_Name"] = name_part
+                        break
+
+                    # Otherwise, treat the whole line as consignee name
+                    data["PDF_Consignee_Name"] = candidate
+                    break
+
+                j += 1
 
         # --- NetAmt candidate 1: Total Taxable Amt in INR @ 1.00 ... ---
         if "TOTAL TAXABLE AMT IN INR" in upper_line and "1.00" in upper_line:
