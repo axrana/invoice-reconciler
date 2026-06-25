@@ -114,22 +114,23 @@ def extract_pdf_data(pdf_path):
                     break
                 j += 1
 
-                               # --- Consignee Name: match on "Consignee ( Shipped to)" only ---
-        if "CONSIGNEE ( SHIPPED TO)" in upper_line:
-            # look for the next non-empty line
+                                       # --- Consignee Name: robust next-line search under Consignee header ---
+        if "CONSIGNEE" in upper_line and "SHIPPED TO" in upper_line:
             j = i + 1
-            while j < len(lines):
+            steps = 0
+            while j < len(lines) and steps < 3:
                 candidate = lines[j].strip()
-                if candidate:  # non-empty
+                if candidate:
                     upper_cand = candidate.upper()
-                    # if the very next non-empty line is already GSTIN, then no consignee name line
+                    # if we hit GSTIN as first real line, treat as "no separate consignee name"
                     if "GSTIN/UID" in upper_cand:
                         break
-                    # otherwise use this line as consignee name
+                    # otherwise take this as consignee name
                     data["PDF_Consignee_Name"] = candidate
                     break
                 j += 1
-
+                steps += 1
+                
         # --- NetAmt candidate 1: Total Taxable Amt in INR @ 1.00 ... ---
         if "TOTAL TAXABLE AMT IN INR" in upper_line and "1.00" in upper_line:
             parts = re.split(r"Total Taxable Amt in INR\s*@\s*1\.00", line, flags=re.IGNORECASE)
