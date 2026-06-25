@@ -9,8 +9,8 @@ EXCEL_FILE = "master_list.xlsx"
 INVOICE_FOLDER = "Invoices"
 OUTPUT_FILE = "reconciliation_report.xlsx"
 
-# Amount tolerance in rupees (remember: Excel already *1000)
-AMOUNT_TOL = 3.0  # NetAmt, Amount, TDS, GST
+# Tolerance in rupees for NetAmt, Amount, TDS, GST (Excel already *1000)
+AMOUNT_TOL = 3.0
 
 
 def extract_numbers_from_text(text):
@@ -27,15 +27,14 @@ def extract_numbers_from_text(text):
         return None
 
 
-def get_next_non_empty_lines(lines, start_index, max_lines=2, stop_markers=None, max_lookahead=10):
+def get_first_non_empty_line(lines, start_index, max_lookahead=8, stop_markers=None):
     """
-    Collect up to `max_lines` non-empty lines below a header,
-    stopping early if we hit any stop marker (e.g. GSTIN/UID, Invoice No.).
+    Get the first non-empty line after a header,
+    stopping if we hit any of the stop markers (e.g. GSTIN/UID, Invoice No.).
     """
     if stop_markers is None:
         stop_markers = []
 
-    collected = []
     for j in range(start_index + 1, min(start_index + 1 + max_lookahead, len(lines))):
         candidate = lines[j].strip()
         if not candidate:
@@ -45,15 +44,22 @@ def get_next_non_empty_lines(lines, start_index, max_lines=2, stop_markers=None,
         if any(marker.upper() in upper_candidate for marker in stop_markers):
             break
 
-        collected.append(candidate)
-        if len(collected) >= max_lines:
-            break
+        return candidate
 
-    return " ".join(collected).strip() if collected else None
+    return None
+
+
+def normalize_name(name):
+    """Normalize party name for exact comparison: strip, collapse spaces, lowercase."""
+    if not name or pd.isna(name):
+        return ""
+    # Remove leading/trailing spaces, collapse internal multiple spaces
+    name = " ".join(str(name).strip().split())
+    return name.lower()
 
 
 def normalize_billno(value):
-    """Normalize BillNo like LS/99999999 -> 99999999 for comparison."""
+    """Normalize BillNo like LS/112633489 -> 112633489 for comparison."""
     if pd.isna(value):
         return ""
     value = str(value).strip()
@@ -88,46 +94,45 @@ def extract_pdf_data(pdf_path):
     for i, line in enumerate(lines):
         upper_line = line.upper()
 
-        # --- BillNo: Invoice No. : LS/99999999 -> 9 digits ---
+        # --- BillNo: Invoice No. : LS/112633489 -> 112633489 ---
         if "INVOICE NO." in upper_line:
             bill_match = re.search(r"LS/\s*(\d{8,9})", line, re.IGNORECASE)
             if bill_match:
                 data["BillNo"] = bill_match.group(1)
 
-        # --- Date ---
+        # --- Date: Invoice Date : DD/MM/YYYY ---
         if "INVOICE DATE" in upper_line:
             date_match = re.search(r"(\d{2}/\d{2}/\d{4})", line)
             if date_match:
                 data["Date"] = date_match.group(1)
 
-        # --- Buyer Name: up to 2 lines, stop at GSTIN/UID or Invoice No. ---
+        # --- Buyer Name: FIRST line only after header ---
         if "DETAILS OF BUYER" in upper_line and "BILLED TO" in upper_line:
-            data["PDF_Buyer_Name"] = get_next_non_empty_lines(
+            data["PDF_Buyer_Name"] = get_first_non_empty_line(
                 lines,
                 i,
-                max_lines=2,
+                max_lookahead=8,
                 stop_markers=["GSTIN/UID", "INVOICE NO."]
             )
 
-        # --- Consignee Name: up to 2 lines, stop at GSTIN/UID ---
+        # --- Consignee Name: FIRST line only after header ---
         if "DETAILS OF  CONSIGNEE" in upper_line and "SHIPPED TO" in upper_line:
-            data["PDF_Consignee_Name"] = get_next_non_empty_lines(
+            data["PDF_Consignee_Name"] = get_first_non_empty_line(
                 lines,
                 i,
-                max_lines=2,
+                max_lookahead=8,
                 stop_markers=["GSTIN/UID"]
             )
 
         # --- NetAmt candidate 1: Total Taxable Amt in INR @ 1.00 ... ---
         if "TOTAL TAXABLE AMT IN INR" in upper_line and "1.00" in upper_line:
-            # Use text after the label if possible
             parts = re.split(r"Total Taxable Amt in INR\s*@\s*1\.00", line, flags=re.IGNORECASE)
             if len(parts) > 1:
                 data["PDF_NetAmt_Taxable"] = extract_numbers_from_text(parts[1])
             else:
                 data["PDF_NetAmt_Taxable"] = extract_numbers_from_text(line)
 
-        # --- NetAmt candidate 2: C&F / Total row ---
+        # --- NetAmt candidate 2: C&F total row (Total ... C&F ...) ---
         if "TOTAL" in upper_line and "C&F" in upper_line:
             data["PDF_NetAmt_TotalRow"] = extract_numbers_from_text(line)
 
@@ -139,10 +144,10 @@ def extract_pdf_data(pdf_path):
             else:
                 data["PDF_Amount_Invoice"] = extract_numbers_from_text(line)
 
-        # --- Terms block: Days + Amount candidate 2 ("5 DAYS FIX INR ...") ---
+        # --- Terms line: Days + "5 DAYS FIX INR ..." style amount ---
         if "TERMS OF DELIVERY AND PAYMENT FROM THE DATE OF INVOICE" in upper_line:
-            # Next non-empty line holds Days and FIX INR amount
-            below = get_next_non_empty_lines(lines, i, max_lines=1)
+            # Next non-empty line holds Days and maybe FIX INR amount
+            below = get_first_non_empty_line(lines, i, max_lookahead=4)
             if below:
                 # Days: first 1-3 digits at start
                 days_match = re.search(r"^\s*(\d{1,3})", below)
@@ -154,6 +159,15 @@ def extract_pdf_data(pdf_path):
                     parts = re.split(r"INR", below, flags=re.IGNORECASE)
                     if len(parts) > 1:
                         data["PDF_Amount_Terms"] = extract_numbers_from_text(parts[1])
+
+        # --- Additional Terms-like amount: DELIVERY ON ADVANCE INR ... ---
+        if "INR" in upper_line and "DELIVERY ON ADVANCE" in upper_line:
+            parts = re.split(r"INR", line, flags=re.IGNORECASE)
+            if len(parts) > 1:
+                extra_amt = extract_numbers_from_text(parts[1])
+                # Prefer an explicit DELIVER/ADVANCE amount if we don't already have one
+                if extra_amt is not None:
+                    data["PDF_Amount_Terms"] = extra_amt
 
         # --- TDS ---
         if "LESS 0.10%" in upper_line and "TDS" in upper_line:
@@ -167,7 +181,7 @@ def extract_pdf_data(pdf_path):
 
 
 def run_reconciliation():
-    print("🚀 Running Offline Verification Engine with double-location checks...")
+    print("🚀 Running Offline Verification Engine (exact name + double-location checks)...")
 
     if not os.path.exists(EXCEL_FILE):
         print(f"❌ Error: Cannot find your Excel sheet named '{EXCEL_FILE}'")
@@ -177,10 +191,10 @@ def run_reconciliation():
     excel_df = pd.read_excel(EXCEL_FILE)
     excel_df.columns = excel_df.columns.str.strip()
 
-    # Normalize BillNo like LS/99999999 -> 99999999
+    # Normalize BillNo like LS/112633489 -> 112633489
     excel_df["BillNo"] = excel_df["BillNo"].apply(normalize_billno)
 
-    # Scale Excel values x1000 (as you require)
+    # Scale Excel values x1000 (as required)
     excel_cols_to_scale = ["NetAmt", "Amount", "TDS", "GST"]
     for col in excel_cols_to_scale:
         if col in excel_df.columns:
@@ -235,15 +249,20 @@ def run_reconciliation():
             status = "Missing Excel Entry"
             notes.append("PDF exists but no corresponding row in Excel.")
         else:
-            # --- Party name check (Buyer + Consignee, 2 lines each) ---
-            excel_name = str(row["EPName"]).strip().lower()
+            # --- Exact party name check (first line, normalized) ---
+            excel_name_norm = normalize_name(row["EPName"])
+            buyer_name_norm = normalize_name(row.get("PDF_Buyer_Name"))
+            consignee_name_norm = normalize_name(row.get("PDF_Consignee_Name"))
 
-            pdf_buyer = str(row.get("PDF_Buyer_Name", "")).strip().lower()
-            pdf_consignee = str(row.get("PDF_Consignee_Name", "")).strip().lower()
-
-            if excel_name and excel_name not in pdf_buyer and excel_name not in pdf_consignee:
-                status = "Discrepancy"
-                notes.append("Party Name mismatch (Excel EPName not found in Buyer/Consignee block).")
+            if excel_name_norm and excel_name_norm not in ("", None):
+                if not (
+                    excel_name_norm == buyer_name_norm
+                    or excel_name_norm == consignee_name_norm
+                ):
+                    status = "Discrepancy"
+                    notes.append(
+                        "Party Name mismatch (Excel EPName not exactly equal to Buyer/Consignee name)."
+                    )
 
             # --- Core numeric fields from Excel (already x1000) ---
             excel_net = float(row["NetAmt"]) if not pd.isna(row.get("NetAmt")) else 0.0
@@ -257,19 +276,15 @@ def run_reconciliation():
             net1 = float(net1) if not pd.isna(net1) else None
             net2 = float(net2) if not pd.isna(net2) else None
 
-            net_ok = False
             if net1 is not None or net2 is not None:
-                # Ensure the two PDF values themselves are consistent if both exist
                 pdf_pair_consistent = True
                 if net1 is not None and net2 is not None:
                     pdf_pair_consistent = abs(net1 - net2) <= AMOUNT_TOL
 
-                # Check Excel vs each candidate
                 m1 = net1 is not None and abs(excel_net - net1) <= AMOUNT_TOL
                 m2 = net2 is not None and abs(excel_net - net2) <= AMOUNT_TOL
 
-                if pdf_pair_consistent and (m1 or m2):
-                    net_ok = True
+                net_ok = pdf_pair_consistent and (m1 or m2)
 
                 if not net_ok:
                     status = "Discrepancy"
@@ -285,7 +300,6 @@ def run_reconciliation():
             amt1 = float(amt1) if not pd.isna(amt1) else None
             amt2 = float(amt2) if not pd.isna(amt2) else None
 
-            amt_ok = False
             if amt1 is not None or amt2 is not None:
                 pdf_pair_consistent = True
                 if amt1 is not None and amt2 is not None:
@@ -294,15 +308,14 @@ def run_reconciliation():
                 m1 = amt1 is not None and abs(excel_amt - amt1) <= AMOUNT_TOL
                 m2 = amt2 is not None and abs(excel_amt - amt2) <= AMOUNT_TOL
 
-                if pdf_pair_consistent and (m1 or m2):
-                    amt_ok = True
+                amt_ok = pdf_pair_consistent and (m1 or m2)
 
                 if not amt_ok:
                     status = "Discrepancy"
                     notes.append(
                         f"Amount mismatch (Excel: {excel_amt:.2f}, "
                         f"Invoice: {amt1 if amt1 is not None else 'NA'}, "
-                        f"Terms: {amt2 if amt2 is not None else 'NA'})"
+                        f"Terms/Advance: {amt2 if amt2 is not None else 'NA'})"
                     )
 
             # --- TDS ---
@@ -315,7 +328,7 @@ def run_reconciliation():
                         f"TDS mismatch (Excel: {excel_tds:.2f}, PDF: {tds_pdf:.2f})"
                     )
 
-            # --- GST (Total Tax Amount) ---
+            # --- GST ---
             gst_pdf = row.get("GST")
             gst_pdf = float(gst_pdf) if not pd.isna(gst_pdf) else None
             if gst_pdf is not None:
@@ -327,21 +340,18 @@ def run_reconciliation():
 
             # --- Days: exact match, no tolerance ---
             pdf_days = row.get("Days")
-            if not pd.isna(row.get("Days")) and not pd.isna(row.get("Days_Excel", row.get("Days"))):
-                # Excel Days may be in 'Days' column (no suffix) or 'Days_Excel' after merge
-                excel_days_val = row.get("Days_Excel", row.get("Days"))
-                if not pd.isna(excel_days_val) and pdf_days is not None:
-                    try:
-                        excel_days_int = int(excel_days_val)
-                        pdf_days_int = int(pdf_days)
-                        if excel_days_int != pdf_days_int:
-                            status = "Discrepancy"
-                            notes.append(
-                                f"Days mismatch (Excel: {excel_days_int}, PDF: {pdf_days_int})"
-                            )
-                    except Exception:
-                        # If conversion fails, skip Days check
-                        pass
+            excel_days_val = row.get("Days_Excel", row.get("Days"))
+            if not pd.isna(excel_days_val) and pdf_days is not None and not pd.isna(pdf_days):
+                try:
+                    excel_days_int = int(excel_days_val)
+                    pdf_days_int = int(pdf_days)
+                    if excel_days_int != pdf_days_int:
+                        status = "Discrepancy"
+                        notes.append(
+                            f"Days mismatch (Excel: {excel_days_int}, PDF: {pdf_days_int})"
+                        )
+                except Exception:
+                    pass
 
         row["Reconciliation_Status"] = status
         row["Discrepancy_Notes"] = ", ".join(notes) if notes else "All data points verified"
