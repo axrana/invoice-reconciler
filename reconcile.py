@@ -113,14 +113,14 @@ def extract_pdf_data(pdf_path):
                     break
                 j += 1
 
-        # --- Consignee Name: RESTORED SIMPLE LOGIC FROM OLD BUILD ---
-        # This is exactly what you pasted:
-        #   if "Details of Consignee" in line and "Shipped to" in line:
-        #       if i + 1 < len(lines):
-        #           data["PDF_Consignee_Name"] = lines[i + 1].strip()
+                # --- Consignee Name: old logic + stop if next line is GSTIN/UID ---
         if "Details of Consignee" in line and "Shipped to" in line:
             if i + 1 < len(lines):
-                data["PDF_Consignee_Name"] = lines[i + 1].strip()
+                next_line = lines[i + 1].strip()
+                upper_next = next_line.upper()
+                # if the next line is already GSTIN, then there is no separate consignee name line
+                if "GSTIN/UID" not in upper_next:
+                    data["PDF_Consignee_Name"] = next_line
 
         # --- NetAmt candidate 1: Total Taxable Amt in INR @ 1.00 ... ---
         if "TOTAL TAXABLE AMT IN INR" in upper_line and "1.00" in upper_line:
