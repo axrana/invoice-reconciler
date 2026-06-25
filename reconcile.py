@@ -27,28 +27,6 @@ def extract_numbers_from_text(text):
         return None
 
 
-def get_first_non_empty_line(lines, start_index, max_lookahead=8, stop_markers=None):
-    """
-    Get the first non-empty line after a header,
-    stopping if we hit any of the stop markers (e.g. GSTIN/UID, Invoice No.).
-    """
-    if stop_markers is None:
-        stop_markers = []
-
-    for j in range(start_index + 1, min(start_index + 1 + max_lookahead, len(lines))):
-        candidate = lines[j].strip()
-        if not candidate:
-            continue
-
-        upper_candidate = candidate.upper()
-        if any(marker.upper() in upper_candidate for marker in stop_markers):
-            break
-
-        return candidate
-
-    return None
-
-
 def get_next_non_empty_line(lines, start_index, max_lookahead=8):
     """Return the next non-empty line after start_index."""
     for j in range(start_index + 1, min(start_index + 1 + max_lookahead, len(lines))):
@@ -73,6 +51,7 @@ def normalize_billno(value):
     value = str(value).strip()
     match = re.search(r"(\d{8,9})", value)
     return match.group(1) if match else value
+
 
 def extract_pdf_data(pdf_path):
     data = {
@@ -113,15 +92,48 @@ def extract_pdf_data(pdf_path):
             if date_match:
                 data["Date"] = date_match.group(1)
 
-        # --- Buyer Name: EXACT header match, next line only ---
+        # --- Buyer Name: find first valid line BELOW header ---
         if line.strip() == "Details of Buyer ( Billed to)":
-            if i + 1 < len(lines):
-                data["PDF_Buyer_Name"] = lines[i + 1].strip()
+            j = i + 1
+            while j < len(lines):
+                candidate = lines[j].strip()
+                upper_cand = candidate.upper()
 
-        # --- Consignee Name: EXACT header match, next line only ---
+                # stop if we hit start of consignee section
+                if "DETAILS OF" in upper_cand and "CONSIGNEE" in upper_cand:
+                    break
+
+                # skip empty or non-name lines
+                if candidate and not (
+                    "INVOICE NO." in upper_cand
+                    or "INVOICE DATE" in upper_cand
+                    or "GSTIN/UID" in upper_cand
+                    or "FINANCIAL YEAR" in upper_cand
+                ):
+                    data["PDF_Buyer_Name"] = candidate
+                    break
+                j += 1
+
+        # --- Consignee Name: find first valid line BELOW header ---
         if line.strip() == "Details of  Consignee ( Shipped to)":
-            if i + 1 < len(lines):
-                data["PDF_Consignee_Name"] = lines[i + 1].strip()
+            j = i + 1
+            while j < len(lines):
+                candidate = lines[j].strip()
+                upper_cand = candidate.upper()
+
+                # stop when we hit GSTIN/PAN row (beyond name)
+                if "GSTIN/UID" in upper_cand and "PAN" in upper_cand:
+                    break
+
+                # skip empty or non-name lines
+                if candidate and not (
+                    "GSTIN/UID" in upper_cand
+                    or "PAN NO" in upper_cand
+                    or "STATE :" in upper_cand
+                ):
+                    data["PDF_Consignee_Name"] = candidate
+                    break
+                j += 1
 
         # --- NetAmt candidate 1: Total Taxable Amt in INR @ 1.00 ... ---
         if "TOTAL TAXABLE AMT IN INR" in upper_line and "1.00" in upper_line:
@@ -143,17 +155,15 @@ def extract_pdf_data(pdf_path):
             else:
                 data["PDF_Amount_Invoice"] = extract_numbers_from_text(line)
 
-        # --- Terms: exact header, use LAST amount in next line ---
+        # --- Terms: exact header, use LAST amount in next non-empty line ---
         if line.strip().startswith("Terms of Delivery and Payment from the date of invoice"):
-            if i + 1 < len(lines):
-                below = lines[i + 1].strip()
-
-                # Optional: Days at start (e.g. "5 DAYS ...")
+            below = get_next_non_empty_line(lines, i, max_lookahead=8)
+            if below:
+                # Optional Days at start (e.g. "5 DAYS ...")
                 days_match = re.search(r"^\s*(\d{1,3})", below)
                 if days_match:
                     data["Days"] = int(days_match.group(1))
-
-                # Terms amount: always use last number on this line
+                # Terms amount: last number in the line (e.g. DELIVERY ON ADVANCE INR 77,597.00)
                 terms_amt = extract_numbers_from_text(below)
                 if terms_amt is not None:
                     data["PDF_Amount_Terms"] = terms_amt
@@ -170,7 +180,7 @@ def extract_pdf_data(pdf_path):
 
 
 def run_reconciliation():
-    print("🚀 Running Offline Verification Engine (exact name + simplified terms amount)...")
+    print("🚀 Running Offline Verification Engine...")
 
     if not os.path.exists(EXCEL_FILE):
         print(f"❌ Error: Cannot find your Excel sheet named '{EXCEL_FILE}'")
