@@ -92,8 +92,8 @@ def extract_pdf_data(pdf_path):
             if date_match:
                 data["Date"] = date_match.group(1)
 
-        # --- Buyer Name: find first valid line BELOW header ---
-        if line.strip() == "Details of Buyer ( Billed to)":
+        # --- Buyer Name: first real line below Buyer header ---
+        if "DETAILS OF BUYER" in upper_line and "BILLED TO" in upper_line:
             j = i + 1
             while j < len(lines):
                 candidate = lines[j].strip()
@@ -103,7 +103,6 @@ def extract_pdf_data(pdf_path):
                 if "DETAILS OF" in upper_cand and "CONSIGNEE" in upper_cand:
                     break
 
-                # skip empty or non-name lines
                 if candidate and not (
                     "INVOICE NO." in upper_cand
                     or "INVOICE DATE" in upper_cand
@@ -114,23 +113,15 @@ def extract_pdf_data(pdf_path):
                     break
                 j += 1
 
-                                       # --- Consignee Name: robust next-line search under Consignee header ---
-        if "CONSIGNEE" in upper_line and "SHIPPED TO" in upper_line:
-            j = i + 1
-            steps = 0
-            while j < len(lines) and steps < 3:
-                candidate = lines[j].strip()
-                if candidate:
-                    upper_cand = candidate.upper()
-                    # if we hit GSTIN as first real line, treat as "no separate consignee name"
-                    if "GSTIN/UID" in upper_cand:
-                        break
-                    # otherwise take this as consignee name
-                    data["PDF_Consignee_Name"] = candidate
-                    break
-                j += 1
-                steps += 1
-                
+        # --- Consignee Name: RESTORED SIMPLE LOGIC FROM OLD BUILD ---
+        # This is exactly what you pasted:
+        #   if "Details of Consignee" in line and "Shipped to" in line:
+        #       if i + 1 < len(lines):
+        #           data["PDF_Consignee_Name"] = lines[i + 1].strip()
+        if "Details of Consignee" in line and "Shipped to" in line:
+            if i + 1 < len(lines):
+                data["PDF_Consignee_Name"] = lines[i + 1].strip()
+
         # --- NetAmt candidate 1: Total Taxable Amt in INR @ 1.00 ... ---
         if "TOTAL TAXABLE AMT IN INR" in upper_line and "1.00" in upper_line:
             parts = re.split(r"Total Taxable Amt in INR\s*@\s*1\.00", line, flags=re.IGNORECASE)
@@ -151,11 +142,11 @@ def extract_pdf_data(pdf_path):
             else:
                 data["PDF_Amount_Invoice"] = extract_numbers_from_text(line)
 
-        # --- Terms: exact header, use LAST amount in next non-empty line ---
+        # --- Terms: use LAST amount in next non-empty line ---
         if line.strip().startswith("Terms of Delivery and Payment from the date of invoice"):
             below = get_next_non_empty_line(lines, i, max_lookahead=8)
             if below:
-                # Optional Days at start (e.g. "5 DAYS ...")
+                # Days: first 1–3 digits at start, if present
                 days_match = re.search(r"^\s*(\d{1,3})", below)
                 if days_match:
                     data["Days"] = int(days_match.group(1))
