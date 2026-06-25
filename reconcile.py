@@ -119,11 +119,11 @@ def extract_pdf_data(pdf_path):
                 next_line = lines[i + 1].strip()
                 upper_next = next_line.upper()
 
-                # If the next line starts with GSTIN, there is no separate name line
+                # If the next line starts with GSTIN, no separate name line
                 if upper_next.startswith("GSTIN/UID"):
                     pass
                 else:
-                    # If GSTIN/UID appears later, keep only part before it
+                    # If GSTIN/UID appears later in the line, keep only part before it
                     if "GSTIN/UID" in upper_next:
                         parts = re.split(r"GSTIN/UID", next_line, flags=re.IGNORECASE)
                         name_part = parts[0].strip()
@@ -351,6 +351,24 @@ def run_reconciliation():
                         )
                 except Exception:
                     pass
+
+        # DEBUG columns so you can see what is being compared
+        row["DEBUG_NetAmt_Excel"] = excel_net
+        row["DEBUG_Net1_PDF"] = net1
+        row["DEBUG_Net2_PDF"] = net2
+
+        row["DEBUG_Amount_Excel"] = excel_amt
+        row["DEBUG_Amt1_PDF"] = amt1
+        row["DEBUG_Amt2_PDF"] = amt2
+
+        row["DEBUG_TDS_Excel"] = excel_tds
+        row["DEBUG_TDS_PDF"] = tds_pdf
+
+        row["DEBUG_GST_Excel"] = excel_gst
+        row["DEBUG_GST_PDF"] = gst_pdf
+
+        row["DEBUG_Days_Excel"] = excel_days_val
+        row["DEBUG_Days_PDF"] = pdf_days_val
 
         row["Reconciliation_Status"] = status
         row["Discrepancy_Notes"] = ", ".join(notes) if notes else "All data points verified"
